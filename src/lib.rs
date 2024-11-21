@@ -105,8 +105,3 @@ where
         }
     }
 }
-
-pub type ColumnValueMap = HashMap<String, BasicType>;
-
-#[cfg(test)]
-mod tests {}
