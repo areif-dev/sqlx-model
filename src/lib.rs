@@ -1,8 +1,18 @@
 mod sqlite;
 
 pub use sqlite::SqliteModel;
+use sqlx::SqlitePool;
 
-use std::collections::HashMap;
+pub fn sanitize_name<S: ToString>(input: S) -> String {
+    let input = input.to_string();
+    format!(
+        "`{}`",
+        input
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<String>()
+    )
+}
 
 #[derive(Debug, Clone)]
 pub enum BasicType {
@@ -103,5 +113,18 @@ where
             Some(v) => v.into(),
             None => BasicType::Null,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize() {
+        assert_eq!(&sanitize_name("'; drop table Users;"), "`droptableUsers`");
+        assert_eq!(&sanitize_name("ValidName"), "`ValidName`");
+        assert_eq!(&sanitize_name("Valid_Name"), "`Valid_Name`");
+        assert_eq!(&sanitize_name("; select * from Test;"), "`selectfromtest`");
     }
 }
