@@ -125,6 +125,6 @@ mod tests {
         assert_eq!(&sanitize_name("'; drop table Users;"), "`droptableUsers`");
         assert_eq!(&sanitize_name("ValidName"), "`ValidName`");
         assert_eq!(&sanitize_name("Valid_Name"), "`Valid_Name`");
-        assert_eq!(&sanitize_name("; select * from Test;"), "`selectfromtest`");
+        assert_eq!(&sanitize_name("; select * from Test;"), "`selectfromTest`");
     }
 }
