@@ -63,31 +63,36 @@ fn val_to_basic_num(val: &serde_json::Value) -> Option<BasicType> {
 }
 
 #[derive(Debug)]
-pub struct QueryBuilder<M: SqliteModel> {
+pub struct QueryBuilder<M> {
     base_clause: String,
     where_clause: String,
     vals: Vec<serde_json::Value>,
+    _model: M,
 }
 
 fn build_where_clause(col: &str, op: &str) -> String {
     format!(" where {} {} ?", sanitize_name(col), op,)
 }
 
-impl<M> QueryBuilder<M>
-where
-    M: SqliteModel + for<'r> FromRow<'r, SqliteRow> + Send + Unpin + Clone,
-{
-    pub fn eq(self, col: &str, val: serde_json::Value) -> QueryBuilder<M> {
+impl<M> QueryBuilder<M> {
+    pub fn eq(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
         let mut new_vals = self.vals.to_vec();
         new_vals.push(val);
-        QueryBuilder {
+        QueryBuilder::<M> {
             where_clause: build_where_clause(col, "="),
+            vals: new_vals,
             ..self
         }
     }
 
-    pub async fn fetch_one(self, pool: &SqlitePool) -> Result<M, M::Error> {
-        let all = self.fetch_limit(pool, Some(1)).await?;
+    pub async fn fetch_one(self, pool: &SqlitePool) -> Result<M, M::Error>
+    where
+        M: SqliteModel + Clone + for<'r> FromRow<'r, SqliteRow> + Send + Unpin,
+    {
+        let all: Vec<M> = self.fetch_limit(pool, Some(1)).await?;
         Ok(all.get(0).ok_or(sqlx::Error::RowNotFound)?.clone())
     }
 
@@ -95,7 +100,10 @@ where
         self,
         pool: &SqlitePool,
         limit: Option<usize>,
-    ) -> Result<Vec<M>, M::Error> {
+    ) -> Result<Vec<M>, M::Error>
+    where
+        M: SqliteModel + for<'r> FromRow<'r, SqliteRow> + Send + Unpin,
+    {
         let limit = limit.map_or("".to_string(), |l| format!(" limit {}", l));
         let query_str = format!("{}{}{};", self.base_clause, self.where_clause, limit);
         let query =
@@ -111,6 +119,8 @@ where
 pub trait SqliteModel {
     /// Custom error type for the model, which must implement the standard Error trait and be convertible from sqlx::Error
     type Error: From<sqlx::Error> + From<serde_json::Error>;
+
+    fn new() -> Self;
 
     /// The name of this type in the database
     ///
@@ -253,7 +263,7 @@ pub trait SqliteModel {
     /// # Errors
     /// - Returns Self::Error if the database operation fails or if no record matches the filter
     /// or some other sqlx::Error occurs.
-    async fn select() -> QueryBuilder<Self>
+    fn select() -> QueryBuilder<Self>
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
@@ -261,6 +271,7 @@ pub trait SqliteModel {
             base_clause: format!("select * from {}", sanitize_name(Self::table_name())),
             where_clause: "".to_string(),
             vals: Vec::new(),
+            _model: Self::new(),
         }
     }
 
@@ -334,7 +345,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, FromRow, Serialize)]
+    #[derive(Debug, FromRow, Serialize, Clone)]
     struct TestModel {
         pub id: i64,
         pub name: String,
@@ -345,6 +356,15 @@ mod tests {
     #[async_trait]
     impl SqliteModel for TestModel {
         type Error = Error;
+
+        fn new() -> Self {
+            Self {
+                id: 0,
+                name: "".to_string(),
+                passwd: Vec::new(),
+                created_at: 0,
+            }
+        }
     }
 
     async fn create_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
@@ -455,6 +475,15 @@ mod tests {
         assert_eq!(sec.created_at, 3);
     }
 
+    #[test]
+    fn test_select() {
+        let query = TestModel::select();
+        assert_eq!(&query.base_clause, "select * from `TestModel`");
+
+        let query = query.eq("id", 1.into());
+        assert_eq!(&query.where_clause, " where `id` = ?");
+    }
+
     #[tokio::test]
     async fn test_select_one() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
@@ -466,8 +495,11 @@ mod tests {
             created_at: 1,
         };
         test.upsert(&pool, &["id"], "id").await.unwrap();
-
-        let res = TestModel::select_one(&pool, "id", 1.into()).await.unwrap();
+        let res = TestModel::select()
+            .eq("id", 1.into())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(res.id, 1);
         assert_eq!(res.name, test.name);
         assert_eq!(res.passwd, test.passwd);
@@ -493,12 +525,30 @@ mod tests {
         test.upsert(&pool, &["id"], "id").await.unwrap();
         test1.upsert(&pool, &["id"], "id").await.unwrap();
 
-        let res = TestModel::select_many(&pool, "id", 1.into()).await.unwrap();
+        let res = TestModel::select()
+            .eq("id", 1.into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
         assert_eq!(res.len(), 1);
-        let res = TestModel::select_many(&pool, "name", "Test".into())
+        let res = TestModel::select()
+            .eq("name", "Test".into())
+            .fetch_limit(&pool, None)
             .await
             .unwrap();
 
+        assert_eq!(res.len(), 2);
+        let (res1, res2) = (res.get(0).unwrap(), res.get(1).unwrap());
+        assert_eq!(res1.id, 1);
+        assert_eq!(res1.name, test.name);
+        assert_eq!(res1.passwd, test.passwd);
+        assert_eq!(res1.created_at, test.created_at);
+        assert_eq!(res2.id, 2);
+        assert_eq!(res2.name, test1.name);
+        assert_eq!(res2.passwd, test1.passwd);
+        assert_eq!(res2.created_at, test1.created_at);
+
+        let res = TestModel::select().fetch_limit(&pool, None).await.unwrap();
         assert_eq!(res.len(), 2);
         let (res1, res2) = (res.get(0).unwrap(), res.get(1).unwrap());
         assert_eq!(res1.id, 1);
