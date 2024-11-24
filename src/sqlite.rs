@@ -2,9 +2,9 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 use serde::{ser::Error, Serialize};
-use sqlx::{sqlite::SqliteRow, FromRow};
+use sqlx::{sqlite::SqliteRow, FromRow, SqlitePool};
 
-use crate::BasicType;
+use crate::{sanitize_name, BasicType};
 
 fn bind_values<'q, T>(
     query_str: &'q str,
@@ -60,6 +60,51 @@ fn val_to_basic_num(val: &serde_json::Value) -> Option<BasicType> {
         return None;
     }
     None
+}
+
+#[derive(Debug)]
+pub struct QueryBuilder<M: SqliteModel> {
+    base_clause: String,
+    where_clause: String,
+    vals: Vec<serde_json::Value>,
+}
+
+fn build_where_clause(col: &str, op: &str) -> String {
+    format!(" where {} {} ?", sanitize_name(col), op,)
+}
+
+impl<M> QueryBuilder<M>
+where
+    M: SqliteModel + for<'r> FromRow<'r, SqliteRow> + Send + Unpin + Clone,
+{
+    pub fn eq(self, col: &str, val: serde_json::Value) -> QueryBuilder<M> {
+        let mut new_vals = self.vals.to_vec();
+        new_vals.push(val);
+        QueryBuilder {
+            where_clause: build_where_clause(col, "="),
+            ..self
+        }
+    }
+
+    pub async fn fetch_one(self, pool: &SqlitePool) -> Result<M, M::Error> {
+        let all = self.fetch_limit(pool, Some(1)).await?;
+        Ok(all.get(0).ok_or(sqlx::Error::RowNotFound)?.clone())
+    }
+
+    pub async fn fetch_limit(
+        self,
+        pool: &SqlitePool,
+        limit: Option<usize>,
+    ) -> Result<Vec<M>, M::Error> {
+        let limit = limit.map_or("".to_string(), |l| format!(" limit {}", l));
+        let query_str = format!("{}{}{};", self.base_clause, self.where_clause, limit);
+        let query =
+            bind_values(&query_str, &self.vals).ok_or(serde_json::Error::custom(format!(
+                "QueryBuilder::limit: cannot parse values of {:?} for query {}",
+                &self.vals, &query_str
+            )))?;
+        Ok(query.fetch_all(pool).await?)
+    }
 }
 
 #[async_trait]
@@ -208,59 +253,15 @@ pub trait SqliteModel {
     /// # Errors
     /// - Returns Self::Error if the database operation fails or if no record matches the filter
     /// or some other sqlx::Error occurs.
-    async fn select_one(
-        pool: &sqlx::SqlitePool,
-        col: &str,
-        val: serde_json::Value,
-    ) -> Result<Self, Self::Error>
+    async fn select() -> QueryBuilder<Self>
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
-        let query_str = format!(
-            "select * from {} where {} = ? limit 1;",
-            Self::table_name(),
-            col
-        );
-        let vals = vec![val];
-        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
-            "Select One: cannot parse {} into Sqlite compatible type",
-            &vals.get(0).ok_or(serde_json::Error::custom(
-                "select_one: vec of vals should have exactly 1 item, found none"
-            ))?
-        )))?;
-        Ok(query.fetch_one(pool).await?)
-    }
-
-    /// Selects multiple records from the table based on the specified column and value.
-    ///
-    /// # Arguments
-    /// - pool: A reference to a sqlx::SqlitePool used for database interaction.
-    /// - col: The name of the column to filter by.
-    /// - val: The value to filter by, wrapped in BasicType.
-    ///
-    /// # Returns
-    /// - Result<Vec<Self>, Self::Error>: Returns a vector of model instances that
-    /// match the filter on success, otherwise returns an error.
-    ///
-    /// # Errors
-    /// - Returns Self::Error if the database operation fails.
-    async fn select_many(
-        pool: &sqlx::SqlitePool,
-        col: &str,
-        val: serde_json::Value,
-    ) -> Result<Vec<Self>, Self::Error>
-    where
-        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
-    {
-        let query_str = format!("select * from {} where {} = ?;", Self::table_name(), col);
-        let vals = vec![val];
-        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
-            "select_many: cannot parse {} into Sqlite compatible type",
-            &vals.get(0).ok_or(serde_json::Error::custom(
-                "select_many: vec of vals should have exactly 1 item, found none"
-            ))?
-        )))?;
-        Ok(query.fetch_all(pool).await?)
+        QueryBuilder::<Self> {
+            base_clause: format!("select * from {}", sanitize_name(Self::table_name())),
+            where_clause: "".to_string(),
+            vals: Vec::new(),
+        }
     }
 
     /// Deletes a single record from the table based on the specified column and value and returns the deleted model instance.
