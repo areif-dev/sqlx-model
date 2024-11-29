@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{ser::Error, Serialize};
 use sqlx::{sqlite::SqliteRow, FromRow, SqlitePool};
 
-use crate::{sanitize_name, BasicType};
+use crate::{sanitize_name, BasicType, Comparator, Filter};
 
 fn bind_values<'q, T>(
     query_str: &'q str,
@@ -62,32 +62,255 @@ fn val_to_basic_num(val: &serde_json::Value) -> Option<BasicType> {
     None
 }
 
+/// Constructs a select sql query. Constructed by calling an instance of `SqliteModel::select()`
 #[derive(Debug)]
 pub struct QueryBuilder<M> {
     base_clause: String,
-    where_clause: String,
-    vals: Vec<serde_json::Value>,
+    filters: Vec<Filter>,
     _model: M,
 }
 
-fn build_where_clause(col: &str, op: &str) -> String {
-    format!(" where {} {} ?", sanitize_name(col), op,)
-}
-
 impl<M> QueryBuilder<M> {
-    pub fn eq(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    fn build_where_clause(&self) -> String {
+        let string_filters = self.filters.iter().fold(Vec::new(), |acc, filter| {
+            let mut acc = acc.to_vec();
+            acc.push(format!(
+                "{} {} ?",
+                sanitize_name(&filter.col),
+                filter.comp.to_string()
+            ));
+            acc
+        });
+        if string_filters.len() == 0 {
+            return "".to_string();
+        }
+        format!(" where {}", string_filters.join(" and "))
+    }
+
+    fn filter(self, col: &str, comp: Comparator, val: serde_json::Value) -> QueryBuilder<M>
     where
         M: SqliteModel,
     {
-        let mut new_vals = self.vals.to_vec();
-        new_vals.push(val);
+        let mut new_filters = self.filters.to_vec();
+        new_filters.push(Filter {
+            col: col.to_string(),
+            comp,
+            val,
+        });
         QueryBuilder::<M> {
-            where_clause: build_where_clause(col, "="),
-            vals: new_vals,
+            filters: new_filters,
             ..self
         }
     }
 
+    /// Filter results where a given column equals a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional equals filter.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use sqlx_model::*;
+    /// use sqlx::FromRow;
+    /// use async_trait::async_trait;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Debug, FromRow, Serialize, Clone)]
+    /// struct TestModel {
+    ///     pub id: i64,
+    ///     pub name: String,
+    ///     pub passwd: Vec<u8>,
+    ///     pub created_at: i64,
+    /// }
+    ///
+    /// #[derive(Debug)]
+    /// enum Error {
+    ///     SqlxError(sqlx::Error),
+    ///     SerdeJsonError(serde_json::Error),
+    /// }
+    ///
+    /// impl std::fmt::Display for Error {
+    ///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    ///         write!(f, "{}", self)
+    ///     }
+    /// }
+    ///
+    /// impl std::error::Error for Error {}
+    ///
+    /// impl From<sqlx::Error> for Error {
+    ///     fn from(value: sqlx::Error) -> Self {
+    ///         Error::SqlxError(value)
+    ///     }
+    /// }
+    ///
+    /// impl From<serde_json::Error> for Error {
+    ///     fn from(value: serde_json::Error) -> Self {
+    ///         Error::SerdeJsonError(value)
+    ///     }
+    /// }
+    ///
+    /// #[async_trait]
+    /// impl SqliteModel for TestModel {
+    ///     type Error = Error;
+    ///
+    ///     fn new() -> Self {
+    ///         Self {
+    ///             id: 0,
+    ///             name: "".to_string(),
+    ///             passwd: Vec::new(),
+    ///             created_at: 0,
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///    let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+    ///    let model = TestModel::select().eq("id", 1.into()).fetch_one(&pool).await.unwrap();
+    /// }
+    ///
+    /// ```
+    pub fn eq(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Eq, val)
+    }
+
+    /// Filter results where a given column does not equal a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional not equals filter
+    ///
+    /// # Example
+    ///
+    /// See `[sqlx_model::QueryBuilder::eq]` for an example of using filters
+    pub fn ne(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Ne, val)
+    }
+
+    /// Filter results where a given column is greater or equal a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional greater than or equal filter
+    ///
+    /// # Example
+    ///
+    /// See `[sqlx_model::QueryBuilder::eq]` for an example of using filters
+    pub fn ge(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Ge, val)
+    }
+
+    /// Filter results where a given column is less than a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional less than filter
+    ///
+    /// # Example
+    ///
+    /// See `[sqlx_model::QueryBuilder::eq]` for an example of using filters
+    pub fn lt(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Lt, val)
+    }
+
+    /// Filter results where a given column is less than or equal to a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional less than or equal filter
+    ///
+    /// # Example
+    ///
+    /// See `[sqlx_model::QueryBuilder::eq]` for an example of using filters
+    pub fn le(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Le, val)
+    }
+
+    /// Filter results where a given column is like a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional like filter
+    ///
+    /// # Example
+    ///
+    /// See `[sqlx_model::QueryBuilder::eq]` for an example of using filters
+    pub fn like(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Like, val)
+    }
+
+    /// Filter results where a given column is greater than a given value. Consumes `self`
+    ///
+    /// # Arguments
+    ///
+    /// * `col` - The name of the column to filter for
+    /// * `val` - What value for `col` to filter for
+    ///
+    /// # Returns
+    ///
+    /// A new `QueryBuilder` instance with an additional greater than filter
+    ///
+    /// # Example
+    ///
+    /// See `[sqlx_model::QueryBuilder::eq]` for an example of using filters
+    pub fn gt(self, col: &str, val: serde_json::Value) -> QueryBuilder<M>
+    where
+        M: SqliteModel,
+    {
+        self.filter(col, Comparator::Gt, val)
+    }
+
+    /// Construct
     pub async fn fetch_one(self, pool: &SqlitePool) -> Result<M, M::Error>
     where
         M: SqliteModel + Clone + for<'r> FromRow<'r, SqliteRow> + Send + Unpin,
@@ -96,6 +319,25 @@ impl<M> QueryBuilder<M> {
         Ok(all.get(0).ok_or(sqlx::Error::RowNotFound)?.clone())
     }
 
+    /// Construct and execute an SQL query to fetch an arbitrary number of results based on the
+    /// current filters of `self`. If `limit` is `None`, then no limit will be applied to the
+    /// query, and all results matching the filters will be returned. If a limit is provided, then
+    /// only the first `n` results matching the filters will be returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - Reference to the `SqlitePool` to execute the query with
+    /// * `limit` - The optional maximum number of results to fetch from the database. If `None`,
+    /// then no limit is applied, and all matching results are returned.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec` of all matching models up to a max of `limit` if successful.
+    ///
+    /// # Errors
+    ///
+    /// Will return `M::Error` if a `sqlx::QueryAs` cannot be constructed from the query and values
+    /// provided, or if the database encounters an error while executing the query.
     pub async fn fetch_limit(
         self,
         pool: &SqlitePool,
@@ -104,13 +346,18 @@ impl<M> QueryBuilder<M> {
     where
         M: SqliteModel + for<'r> FromRow<'r, SqliteRow> + Send + Unpin,
     {
-        let limit = limit.map_or("".to_string(), |l| format!(" limit {}", l));
-        let query_str = format!("{}{}{};", self.base_clause, self.where_clause, limit);
-        let query =
-            bind_values(&query_str, &self.vals).ok_or(serde_json::Error::custom(format!(
-                "QueryBuilder::limit: cannot parse values of {:?} for query {}",
-                &self.vals, &query_str
-            )))?;
+        let where_clause = self.build_where_clause();
+        let limit_clause = limit.map_or("".to_string(), |l| format!(" limit {}", l));
+        let query_str = format!("{}{}{};", self.base_clause, where_clause, limit_clause);
+        let vals = self.filters.iter().fold(Vec::new(), |acc, filter| {
+            let mut acc = acc.to_vec();
+            acc.push(filter.val.to_owned());
+            acc
+        });
+        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
+            "QueryBuilder::fetch_limit: cannot parse values of {:?} for query {}",
+            &vals, &query_str
+        )))?;
         Ok(query.fetch_all(pool).await?)
     }
 }
@@ -269,8 +516,7 @@ pub trait SqliteModel {
     {
         QueryBuilder::<Self> {
             base_clause: format!("select * from {}", sanitize_name(Self::table_name())),
-            where_clause: "".to_string(),
-            vals: Vec::new(),
+            filters: Vec::new(),
             _model: Self::new(),
         }
     }
@@ -345,7 +591,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, FromRow, Serialize, Clone)]
+    #[derive(Debug, FromRow, Serialize, Clone, PartialEq, Eq)]
     struct TestModel {
         pub id: i64,
         pub name: String,
@@ -475,15 +721,6 @@ mod tests {
         assert_eq!(sec.created_at, 3);
     }
 
-    #[test]
-    fn test_select() {
-        let query = TestModel::select();
-        assert_eq!(&query.base_clause, "select * from `TestModel`");
-
-        let query = query.eq("id", 1.into());
-        assert_eq!(&query.where_clause, " where `id` = ?");
-    }
-
     #[tokio::test]
     async fn test_select_one() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
@@ -507,23 +744,338 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ne() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        create_table(&pool).await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 1,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 2,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 3,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 4,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 5,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
+        let res = TestModel::select()
+            .ne("name", "Test".into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        let test_models = test_models.get(2..).unwrap().to_vec();
+        assert_eq!(res.len(), 3);
+        assert_eq!(res, test_models);
+    }
+
+    #[tokio::test]
+    async fn test_like() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        create_table(&pool).await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 1,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 2,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 3,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 4,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 5,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
+        let res = TestModel::select()
+            .like("name", "%e%".into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        let test_models = test_models.get(..4).unwrap().to_vec();
+        assert_eq!(res.len(), 4);
+        assert_eq!(res, test_models);
+    }
+
+    #[tokio::test]
+    async fn test_le() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        create_table(&pool).await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 1,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 2,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 3,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 4,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 5,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
+        let res = TestModel::select()
+            .le("id", 3.into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        let test_models = test_models.get(0..3).unwrap().to_vec();
+        assert_eq!(res.len(), 3);
+        assert_eq!(res, test_models);
+    }
+
+    #[tokio::test]
+    async fn test_lt() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        create_table(&pool).await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 1,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 2,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 3,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 4,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 5,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
+        let res = TestModel::select()
+            .lt("id", 3.into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        let test_models = test_models.get(0..2).unwrap().to_vec();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res, test_models);
+    }
+
+    #[tokio::test]
+    async fn test_ge() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        create_table(&pool).await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 1,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 2,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 3,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 4,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 5,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
+        let res = TestModel::select()
+            .ge("id", 2.into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        let test_models = test_models.get(1..).unwrap().to_vec();
+        assert_eq!(res.len(), 4);
+        assert_eq!(res, test_models);
+    }
+
+    #[tokio::test]
+    async fn test_gt() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        create_table(&pool).await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 1,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 2,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 3,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 4,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 5,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
+        let res = TestModel::select()
+            .gt("id", 1.into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        let test_models = test_models.get(1..).unwrap().to_vec();
+        assert_eq!(res.len(), 4);
+        assert_eq!(res, test_models);
+    }
+
+    #[tokio::test]
     async fn test_select_many() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
         create_table(&pool).await.unwrap();
-        let test = TestModel {
-            id: 18,
-            name: "Test".to_string(),
-            passwd: vec![1, 2, 3, 4],
-            created_at: 1,
-        };
-        let test1 = TestModel {
-            id: 18,
-            name: "Test".to_string(),
-            passwd: vec![4, 3, 2, 1, 0],
-            created_at: 2,
-        };
-        test.upsert(&pool, &["id"], "id").await.unwrap();
-        test1.upsert(&pool, &["id"], "id").await.unwrap();
+        let test_models = [
+            TestModel {
+                id: 18,
+                name: "Test".to_string(),
+                passwd: vec![1, 2, 3, 4],
+                created_at: 1,
+            },
+            TestModel {
+                id: 18,
+                name: "Test".to_string(),
+                passwd: vec![4, 3, 2, 1, 0],
+                created_at: 2,
+            },
+            TestModel {
+                id: 19,
+                name: "Charlie".to_string(),
+                passwd: vec![9, 8, 7, 6],
+                created_at: 3,
+            },
+            TestModel {
+                id: 20,
+                name: "Eve".to_string(),
+                passwd: vec![0, 1, 2],
+                created_at: 4,
+            },
+            TestModel {
+                id: 21,
+                name: "Frank".to_string(),
+                passwd: vec![5, 6, 7, 8, 9],
+                created_at: 5,
+            },
+        ];
+        for model in test_models.iter() {
+            model.upsert(&pool, &["id"], "id").await.unwrap();
+        }
 
         let res = TestModel::select()
             .eq("id", 1.into())
@@ -531,34 +1083,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.len(), 1);
+
         let res = TestModel::select()
             .eq("name", "Test".into())
             .fetch_limit(&pool, None)
             .await
             .unwrap();
-
         assert_eq!(res.len(), 2);
         let (res1, res2) = (res.get(0).unwrap(), res.get(1).unwrap());
         assert_eq!(res1.id, 1);
-        assert_eq!(res1.name, test.name);
-        assert_eq!(res1.passwd, test.passwd);
-        assert_eq!(res1.created_at, test.created_at);
+        assert_eq!(res1.name, test_models[0].name);
+        assert_eq!(res1.passwd, test_models[0].passwd);
+        assert_eq!(res1.created_at, test_models[0].created_at);
         assert_eq!(res2.id, 2);
-        assert_eq!(res2.name, test1.name);
-        assert_eq!(res2.passwd, test1.passwd);
-        assert_eq!(res2.created_at, test1.created_at);
+        assert_eq!(res2.name, test_models[1].name);
+        assert_eq!(res2.passwd, test_models[1].passwd);
+        assert_eq!(res2.created_at, test_models[1].created_at);
 
-        let res = TestModel::select().fetch_limit(&pool, None).await.unwrap();
-        assert_eq!(res.len(), 2);
-        let (res1, res2) = (res.get(0).unwrap(), res.get(1).unwrap());
-        assert_eq!(res1.id, 1);
-        assert_eq!(res1.name, test.name);
-        assert_eq!(res1.passwd, test.passwd);
-        assert_eq!(res1.created_at, test.created_at);
-        assert_eq!(res2.id, 2);
-        assert_eq!(res2.name, test1.name);
-        assert_eq!(res2.passwd, test1.passwd);
-        assert_eq!(res2.created_at, test1.created_at);
+        let all_res = TestModel::select().fetch_limit(&pool, None).await.unwrap();
+        assert_eq!(all_res.len(), 5);
+        for i in 0..5 {
+            let res = &all_res[i];
+            let model = &test_models[i];
+            let id: i64 = i as i64 + 1;
+            assert_eq!(res.id, id);
+            assert_eq!(res.name, model.name);
+            assert_eq!(res.passwd, model.passwd);
+            assert_eq!(res.created_at, model.created_at);
+        }
+
+        let some_res = TestModel::select()
+            .gt("id", 1.into())
+            .lt("id", 5.into())
+            .fetch_limit(&pool, None)
+            .await
+            .unwrap();
+        assert_eq!(some_res.len(), 3);
+        assert_eq!(
+            some_res.iter().map(|r| r.id).collect::<Vec<i64>>(),
+            vec![2, 3, 4]
+        );
     }
 
     #[tokio::test]
