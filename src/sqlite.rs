@@ -310,7 +310,21 @@ impl<M> QueryBuilder<M> {
         self.filter(col, Comparator::Gt, val)
     }
 
-    /// Construct
+    /// Construct and execute an SQL query to fetch a single result based on the current filters of
+    /// `self`. Will result in a `RowNotFound` error if no result is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - Reference to the `SqlitePool` to execute the query with
+    ///
+    /// # Returns
+    ///
+    /// If successful, the single matching model. Otherwise, return `SqliteModel::Error`.
+    ///
+    /// # Errors
+    ///
+    /// A `RowNotFound` derived error if no matches are found or any other `sqlx` error encountered
+    /// when executing the query.
     pub async fn fetch_one(self, pool: &SqlitePool) -> Result<M, M::Error>
     where
         M: SqliteModel + Clone + for<'r> FromRow<'r, SqliteRow> + Send + Unpin,
