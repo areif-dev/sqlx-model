@@ -392,11 +392,13 @@ pub trait SqliteModel {
     /// panic if splitting the value of `std::any::type_name` on "::" returns `None`
     fn table_name() -> String {
         let full_path = std::any::type_name::<Self>();
-        full_path
-            .split("::")
-            .last()
-            .expect("Failed to convert type_name to table_name")
-            .to_string()
+        sanitize_name(
+            full_path
+                .split("::")
+                .last()
+                .expect("Failed to convert type_name to table_name")
+                .to_string(),
+        )
     }
 
     /// Inserts a new record into the table and returns the newly created model instance.
