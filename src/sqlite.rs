@@ -381,6 +381,8 @@ pub trait SqliteModel {
     /// Custom error type for the model, which must implement the standard Error trait and be convertible from sqlx::Error
     type Error: From<sqlx::Error> + From<serde_json::Error>;
 
+    /// Required by `QueryBuilder` to construct a concrete instance of `Self`. The actual values of
+    /// the attributes are unimportant and may be completely arbitrary.
     fn new() -> Self;
 
     /// The name of this type in the database
